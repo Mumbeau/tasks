@@ -145,6 +145,8 @@ class tasks_app:
 
         self.input_state = input_state.POSITION
 
+        self.tasks_ui_window.keypad(True)
+
     def run(self):
         while True:
             self.render_frame()
@@ -153,36 +155,47 @@ class tasks_app:
             if execution: self.process_execution(execution, int_index, mod_task)
 
     def printstr(self, window, string, y = None, x = None, style = None):
+        window_height, window_width = window.getmaxyx()
+        
+        # Boundary check to prevent crashes on small terminal heights
+        if y is not None and (y < 0 or y >= window_height):
+            return
+
         if window is self.tasks_pad:
-            # 1. Determine the maximum space available for the text itself
-            # We subtract margins and room for the "..."
-            max_task_width = self.terminal_width - self.left_margin - 5
-            if max_task_width <= 0: return
-            elif max_task_width < 3 and len(string) >= 3: string = "." * max_task_width
-            elif len(string) > max_task_width:
-                # 2. Slice from 0 to the max width, then add the dots
-                string = string[:max_task_width] + "..."
+            available_space = self.terminal_width - self.left_margin - 2
         else:
-            # Standard Window logic: Calculates space from current cursor position
             if y is not None and x is not None: cursor_y, cursor_x = y, x
             else: cursor_y, cursor_x = window.getyx()
-            # We subtract 4 to keep a small safety buffer/padding at the right edge
-            available_space = self.terminal_width - cursor_x
-            if available_space <= 0: return
-            elif available_space < 3 and len(string) >= 3: string = "." * available_space    
-            elif len(string) > available_space:
-                # Subtract another 3 to make room for the dots themselves
-                string = string[:available_space - 3] + "..."
+            available_space = window_width - cursor_x
 
-        if (y is not None and x is not None) and style is not None: window.addstr(y, x, string, style)
-        elif (y is not None and x is not None): window.addstr(y, x, string)
-        elif style is not None: window.addstr(string, style)
-        else: window.addstr(string)
+        if available_space <= 0: return
+        elif available_space < 3 and len(string) >= available_space: string = "." * available_space
+        elif len(string) > available_space:
+            string = string[:available_space - 3] + "..."
 
-    
+        try:
+            if (y is not None and x is not None) and style is not None: window.addstr(y, x, string, style)
+            elif (y is not None and x is not None): window.addstr(y, x, string)
+            elif style is not None: window.addstr(string, style)
+            else: window.addstr(string)
+        except curses.error:
+            cur_y, _ = window.getyx()
+            if cur_y < window_height - 1: raise
+            else: pass
+
+    def print_input(self, window, string, available_space, string_view_start = None, style = None):
+        if available_space <= 0: return
+        if string_view_start is None: string_view_start = max(len(string) - available_space, 0)
+        if string_view_start > 0: display_string = window.addch("<", curses.A_REVERSE)
+        else: window.addch(" ")
+        
+        display_string = string[string_view_start: string_view_start + available_space]
+        if style is not None: window.addstr(display_string, style)
+        else: window.addstr(display_string)
+
+        if string_view_start + available_space < len(string): window.addch(">", curses.A_REVERSE)
+
     def render_frame(self, execution = None, int_human_index = None):
-        # self.stdscr.erase()
-        # self.stdscr.noutrefresh()
         cursor_hidden = False
         while self.terminal_height < self.APP_MINIMUM_HEIGHT or self.terminal_width < self.APP_MINIMUM_WIDTH:
             if not cursor_hidden: curses.curs_set(0); cursor_hidden = True
@@ -267,7 +280,7 @@ class tasks_app:
 
     def position_prompt(self):
         if self.input_state != input_state.POSITION: self.input_state = input_state.POSITION
-        position_prompt = "Which position would you like to modify: "
+        position_prompt = "Which position would you like to modify:"
         self.printstr(self.tasks_ui_window, position_prompt, self.INFO_PROMPTS_START_Y, self.INDEX_START_X); self.tasks_ui_window.clrtobot()
         self.printstr(self.tasks_ui_window, f"Enter '{self.EXIT_STR}' or '0' to exit.", self.INFO_PROMPTS_START_Y + 1, self.INDEX_START_X)
         self.printstr(self.tasks_ui_window, "Use '+' to append a new task.", self.INFO_PROMPTS_START_Y + 2, self.INDEX_START_X)
@@ -301,29 +314,63 @@ class tasks_app:
         if self.input_state != input_state.STRING: self.input_state = input_state.STRING
         choosen_execution = "task" if execution == Execution.ADD else "edit"
         self.printstr(self.tasks_ui_window, f"Position: {int_human_index}", self.INFO_PROMPTS_START_Y, self.INDEX_START_X); self.tasks_ui_window.clrtobot()
-        self.printstr(self.tasks_ui_window, f"new {choosen_execution}: ", self.INFO_PROMPTS_START_Y + 1, self.INDEX_START_X)
+        self.printstr(self.tasks_ui_window, f"{choosen_execution}:", self.INFO_PROMPTS_START_Y + 1, self.INDEX_START_X)
         self.tasks_ui_window.refresh()
 
-    def get_input(self, window, execution = None, int_human_index = None):
-        buffer = ""
+    def get_string(self, window, execution = None, int_human_index = None, buffer = ""):
+        original_y, original_x = window.getyx()
+        _, max_x = window.getmaxyx()
+        
+        available_space = max(max_x - original_x - 3, 0)
+        
+        buffer_view_start, buffer_cursor_pos = 0, len(buffer)
+
         while True:
+            if buffer_cursor_pos >= buffer_view_start + available_space:
+                buffer_view_start = buffer_cursor_pos - available_space + 1
+            
+            if buffer_cursor_pos < buffer_view_start:
+                buffer_view_start = buffer_cursor_pos
+
+            window.move(original_y, original_x); window.clrtoeol()
+            self.print_input(window, buffer, available_space, buffer_view_start)
+            
+            window.move(original_y, original_x + 1 + (buffer_cursor_pos - buffer_view_start))
+            window.refresh()
+
             char_code = window.getch()
 
-            if char_code in (10, 13):
+            if char_code in (10, 13): # Enter
                 break
-            elif char_code == curses.KEY_RESIZE: self.rework_windows = True; self.resize_updates(execution, int_human_index); self.printstr(window, buffer)
+                
+            elif char_code == curses.KEY_RESIZE:
+                self.rework_windows = True
+                self.resize_updates(execution, int_human_index) 
+                original_y, original_x = window.getyx()
+                _, max_x = window.getmaxyx()
+                available_space = max(max_x - original_x - 3, 0)
+
+            elif char_code == curses.KEY_LEFT: 
+                if buffer_cursor_pos > 0:
+                    buffer_cursor_pos -= 1
+
+            elif char_code == curses.KEY_RIGHT: 
+                if buffer_cursor_pos < len(buffer):
+                    buffer_cursor_pos += 1
+
             elif char_code in (curses.KEY_BACKSPACE, 127, 8):
-                if not buffer:
-                    continue
-                buffer = buffer[:-1]
-                y, x = window.getyx()
-                window.move(y, x - 1)
-                window.addch(" ")
-                window.move(y, x - 1)
-            elif 32 <= char_code <= 126:
+                if buffer_cursor_pos > 0:
+                    buffer = buffer[:buffer_cursor_pos - 1] + buffer[buffer_cursor_pos:]
+                    buffer_cursor_pos -= 1
+
+            elif char_code == curses.KEY_DC: # Delete Key
+                if buffer_cursor_pos < len(buffer):
+                    buffer = buffer[:buffer_cursor_pos] + buffer[buffer_cursor_pos + 1:]
+
+            elif 32 <= char_code <= 126: # Standard Characters
                 char = chr(char_code)
-                buffer += char
-                self.printstr(window, char)
+                buffer = buffer[:buffer_cursor_pos] + char + buffer[buffer_cursor_pos:]
+                buffer_cursor_pos += 1
 
         return buffer
     
@@ -345,7 +392,7 @@ class tasks_app:
     
     def process_interaction(self):
         if self.input_state != input_state.POSITION: self.position_prompt()
-        human_index = self.get_input(self.tasks_ui_window).strip()
+        human_index = self.get_string(self.tasks_ui_window).strip()
         if human_index.lower() in (self.EXIT_STR, "0"): return Execution.EXIT_APP, None, None
         try:
             # Route '+' or index to the appropriate logic position
@@ -372,14 +419,15 @@ class tasks_app:
                         continue
                     return execution, int_human_index - 1, None
                 case Execution.ADD | Execution.EDIT:
-                    self.task_string_prompt(execution, int_human_index)
+                    if execution == Execution.EDIT: task_string = self.manager.get_task_at(int_human_index - 1)["task"]
+                    else: task_string = ""
+                    self.task_string_prompt(execution, int_human_index,)
                     while True:
-                        if (task_string := self.get_input(self.tasks_ui_window, execution, int_human_index).strip()): break
+                        if (task_string := self.get_string(self.tasks_ui_window, execution, int_human_index, task_string).strip()): break
                     return execution, int_human_index - 1, task_string
                 case _: continue
 
     def process_execution(self, execution, int_index, mod_task = None):
-        # Bridges UI intent to Model logic and updates layout dimensions if needed
         match execution:
             case Execution.ADD:
                 self.manager.add_task(int_index, mod_task)
