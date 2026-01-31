@@ -2,331 +2,396 @@ import curses
 import json
 from curses import wrapper
 from curses.textpad import rectangle
+from enum import Enum, auto
 
-#decorator that enables saving behaviour on a method of a class that contains the list of dictionaries
 def sorts_saves_tasks(base_method):
-    def enhanced_fn(self, *args, **kwargs):
-        #expected return; as in xG = Expected Goals
+    # Decorator: Enforces task priority (Active > Pending) and persists to disk
+    def enhanced_method(self, *args, **kwargs):
         xReturn = base_method(self, *args, **kwargs)
-        #sorts the list with active and pending tasks taking priority respectfully
-        self.list_dicts.sort(key = lambda Dict: (not Dict["active"], not Dict["pending"]))
-        #saves to file
-        with open ("tasks.json", "w") as f:
+        # Sort priority: Active tasks top, then Pending, then Finished
+        self.list_dicts.sort(key=lambda Dict: (not Dict["active"], not Dict["pending"]))
+        with open("tasks.json", "w") as f:
             json.dump(self.list_dicts, f)
         return xReturn
-    return enhanced_fn
+    return enhanced_method
 
-class invalid_index(Exception):
-    pass
+class TaskManager:
+    def __init__(self, max_active=3):
+        self.MAX_ACTIVE = max_active
+        self.list_dicts = self.load_tasks()
+        self.current_active = self.enforce_max_active()
+    def load_tasks(self):
+        try:
+            with open("tasks.json", "r") as f:
+                list_dicts = json.load(f)
+                
+        except (FileNotFoundError, json.JSONDecodeError):
+            list_dicts = []
+        finally:
+            
+            return list_dicts
+
+    def enforce_max_active(self):
+        # Hard-caps active tasks and resets invalid active states (e.g. active but finished)
+        current_active = 0
+        changes = False
+        for Dict in self.list_dicts:
+            if (Dict["active"] and not Dict["pending"]):
+                Dict["active"] = False
+                if not changes: changes = True
+            if Dict["active"] and Dict["pending"]: current_active += 1
+            # Deactivate if over limit or if task was finished while active
+            if current_active > self.MAX_ACTIVE and Dict["active"]:
+                Dict["active"] = False
+                current_active -= 1
+                if not changes: changes = True
+        if changes:
+            self.list_dicts.sort(key=lambda Dict: (not Dict["active"], not Dict["pending"]))
+            with open("tasks.json", "w") as f:
+                json.dump(self.list_dicts, f)
+        return current_active
+
+    @sorts_saves_tasks
+    def add_task(self, index, task_string):
+        self.list_dicts.insert(index, {"task": task_string, "active": False, "pending": True})
+
+    @sorts_saves_tasks
+    def edit_task(self, index, task_string):
+        self.list_dicts[index]["task"] = task_string
+
+    @sorts_saves_tasks
+    def delete_task(self, index):
+        # Decrement counter if we are removing a task currently in an active focus slot
+        if self.list_dicts[index]["active"]:
+            self.current_active -= 1
+        self.list_dicts.pop(index)
+
+    @sorts_saves_tasks
+    def toggle_pending(self, index):
+        # Toggles completion. Auto-deactivates if marking as finished
+        if self.list_dicts[index]["active"]:
+            self.list_dicts[index]["active"] = False
+            self.current_active -= 1
+        self.list_dicts[index]["pending"] = not self.list_dicts[index]["pending"]
+
+    @sorts_saves_tasks
+    def toggle_active(self, index):
+        self.list_dicts[index]["active"] = not self.list_dicts[index]["active"]
+        self.current_active += 1 if self.list_dicts[index]["active"] else -1
+
+    def get_tasks(self): return self.list_dicts
+    def get_count(self): return len(self.list_dicts)
+    def get_task_at(self, index): return self.list_dicts[index]
+
+class Execution(Enum):
+    ADD = auto()
+    EDIT = auto()
+    DELETE = auto()
+    PENDING = auto()
+    ACTIVE = auto()
+    QUIT = auto()
+    EXIT_APP = auto()
+
+class input_state(Enum):
+    POSITION = auto()
+    EXECUTE = auto()
+    STRING = auto()
+
+class invalid_index(Exception): pass
 
 def main(stdscr):
-    #initialises text colour and permanently turns on green text attribute
+    # Global TUI styling and state initialization
     curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
     GREEN_TEXT = curses.color_pair(1)
     stdscr.attron(GREEN_TEXT)
 
-    #Instantiate and run the app
     app = tasks_app(stdscr, GREEN_TEXT, MAX_ACTIVE=3)
     app.run()
-
-    #Turns off text colour attribute
     stdscr.attroff(GREEN_TEXT)
 
 class tasks_app:
     def __init__(self, stdscr, GREEN_TEXT, MAX_ACTIVE=3):
         self.stdscr = stdscr
         self.GREEN_TEXT = GREEN_TEXT
-        self.MAX_ACTIVE = MAX_ACTIVE
-        # Get terminal size for safety
+        self.manager = TaskManager(max_active=MAX_ACTIVE)
         self.terminal_height, self.terminal_width = self.stdscr.getmaxyx()
         
-        # Execution Constants
-        self.ADD_EXECUTE = "a"
-        self.EDIT_EXECUTE = "e"
-        self.DELETE_EXECUTE = "d"
-        self.PENDING_EXECUTE = "f"
-        self.ACTIVE_EXECUTE = "p"
-        self.QUIT_EXECUTE = "q"
-        self.EXIT_APP = "none"
+        # Opcodes for action routing
+        self.ADD_CHAR, self.EDIT_CHAR, self.DELETE_CHAR = "a", "e", "d"
+        self.PENDING_CHAR, self.ACTIVE_CHAR, self.QUIT_CHAR = "f", "p", "q"
+        self.EXIT_STR = "none"
 
-        # Layout Constants
-        self.LEFT_MARGIN = 4
-        self.ACTIVE_MARK_X = 1
-        self.HEADER_Y = 0
-        self.PAD_START_Y = 2
+        # Layout Geometry
+        self.ACTIVE_MARK_X, self.HEADER_Y, self.PAD_START_Y, self.INFO_PROMPTS_HEIGHT = 1, 0, 2, 6
+        self.INDEX_START_X = self.ACTIVE_MARK_X + 3
         self.EMPTY_PROMPT = "(No tasks exist)"
 
-        # Application State
-        self.current_active = 0
-        self.number_of_tasks = self.load_tasks()
-        # + 2 repesents ". " 
-        self.length_of_tasks = max((len(Dict['task']) + len(str(index)) + 2 for index, Dict in enumerate(self.list_dicts, start = 1)),
-                                   default = 0)
+        self.left_margin = 6 + len(str(self.manager.get_count()))
         self.rework_windows = False
-        self.recheck_length_of_tasks = False
 
-        self.task_ui_elements_window = curses.newwin(self.number_of_tasks + self.PAD_START_Y + 2, self.length_of_tasks + self.LEFT_MARGIN + 2, 0, 0)
-        self.task_ui_elements_window.attron(GREEN_TEXT)
+        self.INFO_PROMPTS_START_Y = min(self.manager.get_count() + self.PAD_START_Y + 2, self.terminal_height - self.INFO_PROMPTS_HEIGHT)
+        
+        # Primary Windows: Main UI container, Task Pad, and Input Field
+        #in testing, I've found that windows need a buffer space of 2 columns horizontally but only one row vertically
+        self.tasks_ui_window = curses.newwin(self.terminal_height, 
+                                             self.terminal_width, 0, 0)
+        self.tasks_ui_window.attron(GREEN_TEXT)
+        self.tasks_pad = curses.newpad(max(1000, self.manager.get_count() * 2), 1000)
 
-        #pad for tasks
-        pad_height = max(1000, len(self.list_dicts) * 2)
-        PAD_WIDTH = 1000
-        self.tasks_pad = curses.newpad(pad_height, PAD_WIDTH)
+        #3 tasks lines + 1 for rectangle + 1 for gap = 5
+        self.APP_MINIMUM_HEIGHT = self.PAD_START_Y + self.INFO_PROMPTS_HEIGHT + 5
+        #calculated before hand. Value subject to change as app develops
+        self.APP_MINIMUM_WIDTH = 55
 
-        input_window_height = 7
-        self.input_window = curses.newwin(input_window_height, self.terminal_width, 
-                                          self.number_of_tasks + self.PAD_START_Y + 2, 0)
-        self.input_window.attron(GREEN_TEXT)
+        self.input_state = input_state.POSITION
 
     def run(self):
         while True:
-            self.render_tasks()
-            
+            self.render_frame()
             execution, int_index, mod_task = self.process_interaction()
+            if execution == Execution.EXIT_APP: break
+            if execution: self.process_execution(execution, int_index, mod_task)
 
-            match execution:
-                case self.EXIT_APP:
-                    break
-                case self.ADD_EXECUTE | self.EDIT_EXECUTE | self.DELETE_EXECUTE | self.PENDING_EXECUTE | self.ACTIVE_EXECUTE:
-                    self.process_execution(execution, int_index, mod_task)
-                case _:
-                    continue
+    def printstr(self, window, string, y = None, x = None, style = None):
+        if window is self.tasks_pad:
+            # 1. Determine the maximum space available for the text itself
+            # We subtract margins and room for the "..."
+            max_task_width = self.terminal_width - self.left_margin - 5
+            if max_task_width <= 0: return
+            elif max_task_width < 3 and len(string) >= 3: string = "." * max_task_width
+            elif len(string) > max_task_width:
+                # 2. Slice from 0 to the max width, then add the dots
+                string = string[:max_task_width] + "..."
+        else:
+            # Standard Window logic: Calculates space from current cursor position
+            if y is not None and x is not None: cursor_y, cursor_x = y, x
+            else: cursor_y, cursor_x = window.getyx()
+            # We subtract 4 to keep a small safety buffer/padding at the right edge
+            available_space = self.terminal_width - cursor_x
+            if available_space <= 0: return
+            elif available_space < 3 and len(string) >= 3: string = "." * available_space    
+            elif len(string) > available_space:
+                # Subtract another 3 to make room for the dots themselves
+                string = string[:available_space - 3] + "..."
 
-    def load_tasks(self):
-        try:
-            with open("tasks.json", "r") as f:
-                self.list_dicts = json.load(f)
-                self.enforce_max_active()
-        except (FileNotFoundError, json.JSONDecodeError):
-            self.list_dicts = []
-        finally:
-            return len(self.list_dicts)
+        if (y is not None and x is not None) and style is not None: window.addstr(y, x, string, style)
+        elif (y is not None and x is not None): window.addstr(y, x, string)
+        elif style is not None: window.addstr(string, style)
+        else: window.addstr(string)
 
-    #method that enforces that only a max of 3 tasks are active at once
-    @sorts_saves_tasks
-    def enforce_max_active(self):
-        self.current_active = 0
-        for Dict in self.list_dicts:
-            if Dict["active"] and Dict["pending"]: 
-                self.current_active += 1
-            if (self.current_active > self.MAX_ACTIVE and Dict["active"]) or (Dict["active"] and not Dict["pending"]):
-                Dict["active"] = not Dict["active"]
     
-    def render_tasks(self):
-        #prevents ghosting when the pad refresh area get's smaller
-        self.stdscr.erase()
-        self.stdscr.noutrefresh()
+    def render_frame(self, execution = None, int_human_index = None):
+        # self.stdscr.erase()
+        # self.stdscr.noutrefresh()
+        cursor_hidden = False
+        while self.terminal_height < self.APP_MINIMUM_HEIGHT or self.terminal_width < self.APP_MINIMUM_WIDTH:
+            if not cursor_hidden: curses.curs_set(0); cursor_hidden = True
+            self.screen_size_warning()
+        if cursor_hidden: curses.curs_set(1); cursor_hidden = False
 
-        # 2. Draw the UI BOX first
-        self.render_ui_elements()
-
+        list_dicts = self.manager.get_tasks()
+        number_of_tasks = self.manager.get_count()
+        self.left_margin = 6 + len(str(self.manager.get_count()))
+        
+        self.render_ui_elements(number_of_tasks)
         self.tasks_pad.erase()
 
-        pad_y = 0
-
-        if self.list_dicts != []:
-            self.task_ui_elements_window.addstr(self.HEADER_Y, self.LEFT_MARGIN, "tasks:", self.GREEN_TEXT | curses.A_BOLD)
-            for index, Dict in enumerate(self.list_dicts, start=1):
+        if list_dicts:
+            self.printstr(self.tasks_ui_window, "tasks:", self.HEADER_Y, self.left_margin, self.GREEN_TEXT | curses.A_BOLD)
+            for index, Dict in enumerate(list_dicts):
                 if Dict["active"]:
-                    self.task_ui_elements_window.addstr(pad_y + self.PAD_START_Y, self.ACTIVE_MARK_X, "*")
-                style = self.GREEN_TEXT | curses.A_NORMAL if Dict["pending"] else curses.A_DIM
-                self.tasks_pad.addstr(pad_y, 0, f"{index}. {Dict['task']}", style)
-                pad_y += 1
+                    self.printstr(self.tasks_ui_window, "*", index + self.PAD_START_Y, self.ACTIVE_MARK_X)
+                style = self.GREEN_TEXT if Dict["pending"] else curses.A_DIM
+                if index + 1 < min(number_of_tasks + self.PAD_START_Y - 1, self.terminal_height - self.INFO_PROMPTS_HEIGHT - 3):
+                    self.printstr(self.tasks_ui_window, f"{index + 1}", index + self.PAD_START_Y, self.INDEX_START_X, style)
+                self.printstr(self.tasks_pad, f"{Dict['task']}", index, 0, style)
 
-            self.task_ui_elements_window.noutrefresh()
-            # Refresh pad to screen - these need to be valid screen coordinates
-            self.tasks_pad.noutrefresh(
-                0, 0,  # Top-left of pad content
-                self.PAD_START_Y, self.LEFT_MARGIN,  # Where to start displaying on screen
-                #minus one to correct discrepancy between zero based(scr coordinates) and none zero based(number of tasks)
-                min(self.number_of_tasks + self.PAD_START_Y - 1, self.terminal_height - 5), min(self.length_of_tasks + self.LEFT_MARGIN - 1, self.terminal_width - 1)# Bottom-right corner
-            )
+            self.tasks_ui_window.noutrefresh()
+            # Dynamic viewport calculation for Pad rendering within screen boundaries
+            self.tasks_pad.noutrefresh(0, 0, self.PAD_START_Y, self.left_margin,
+                min(number_of_tasks + self.PAD_START_Y - 1, self.terminal_height - self.INFO_PROMPTS_HEIGHT - 3), self.terminal_width - 3)
         else:
-
-            self.task_ui_elements_window.addstr(self.HEADER_Y, self.LEFT_MARGIN, "tasks:", self.GREEN_TEXT | curses.A_BOLD)
-            self.task_ui_elements_window.addstr(self.PAD_START_Y, self.LEFT_MARGIN, self.EMPTY_PROMPT)
-        
-            self.task_ui_elements_window.noutrefresh()
+            self.printstr(self.tasks_ui_window, "tasks:", self.HEADER_Y, self.left_margin, self.GREEN_TEXT | curses.A_BOLD)
+            self.printstr(self.tasks_ui_window, self.EMPTY_PROMPT, self.PAD_START_Y, self.left_margin)
+            self.tasks_ui_window.noutrefresh()
+        if self.input_state == input_state.POSITION: self.position_prompt()
+        if int_human_index is not None:
+            if execution is not None: self.task_string_prompt(execution, int_human_index)
+            else: self.execution_prompt(int_human_index)
 
         curses.doupdate()
 
-    def render_ui_elements(self):
-        self.task_ui_elements_window.erase()
+    def render_ui_elements(self, number_of_tasks):
+        # Handles Dynamic Window Scaling and UI container rectangles
+        self.tasks_ui_window.erase()
 
-        if self.list_dicts != []:
+        if number_of_tasks > 0:
             if self.rework_windows:
-                self.input_window.mvwin(self.number_of_tasks  + self.PAD_START_Y + 2, 0)
-                self.task_ui_elements_window.resize(self.number_of_tasks + self.PAD_START_Y + 2, self.length_of_tasks + self.LEFT_MARGIN + 2)
+                self.INFO_PROMPTS_START_Y = min(number_of_tasks + self.PAD_START_Y + 2, self.terminal_height - self.INFO_PROMPTS_HEIGHT)
+                self.tasks_ui_window.resize(self.terminal_height, self.terminal_width)
                 self.rework_windows = False
 
-            if 0 < self.current_active <= self.MAX_ACTIVE:
-                rectangle(self.task_ui_elements_window, 
-                        self.PAD_START_Y - 1, self.ACTIVE_MARK_X - 1,
-                        self.current_active + self.PAD_START_Y , self.ACTIVE_MARK_X + 1)    
-            rectangle(self.task_ui_elements_window,
-                    self.PAD_START_Y - 1, self.LEFT_MARGIN - 1,
-                    self.PAD_START_Y + self.number_of_tasks, self.length_of_tasks + self.LEFT_MARGIN)
-            
+            # Draw Focus box for active items and Main Container for the list
+            if 0 < self.manager.current_active <= self.manager.MAX_ACTIVE:
+                rectangle(self.tasks_ui_window, self.PAD_START_Y - 1, self.ACTIVE_MARK_X - 1,
+                        self.manager.current_active + self.PAD_START_Y, self.ACTIVE_MARK_X + 1)    
+            rectangle(self.tasks_ui_window, self.PAD_START_Y - 1, self.INDEX_START_X - 1,
+                    min(self.PAD_START_Y + number_of_tasks, self.terminal_height - self.INFO_PROMPTS_HEIGHT - 2),
+                    self.INDEX_START_X + len(str(number_of_tasks)))
+            rectangle(self.tasks_ui_window, self.PAD_START_Y - 1, self.left_margin - 1,
+                    min(self.PAD_START_Y + number_of_tasks, self.terminal_height - self.INFO_PROMPTS_HEIGHT - 2), self.terminal_width - 2)
         else:
-            self.input_window.mvwin(self.PAD_START_Y + 3, 0)
-            self.task_ui_elements_window.resize(self.PAD_START_Y + 1, len(self.EMPTY_PROMPT) + self.LEFT_MARGIN + 1)
+            self.INFO_PROMPTS_START_Y = self.PAD_START_Y + 2
+            self.tasks_ui_window.resize(self.terminal_height, self.terminal_width)
         
-        self.task_ui_elements_window.noutrefresh()
+        self.tasks_ui_window.noutrefresh()
 
+    def screen_size_warning(self):
+        self.tasks_ui_window.erase()
+            
+        if self.terminal_height < self.APP_MINIMUM_HEIGHT and self.terminal_width < self.APP_MINIMUM_WIDTH: msg = "Terminal too small!"
+        elif self.terminal_height < self.APP_MINIMUM_HEIGHT: msg = "Terminal too short!"
+        else: msg = "Terminal too narrow!"
+
+        # Center the message roughly
+        self.printstr(self.tasks_ui_window, msg, self.terminal_height // 2, max(0, (self.terminal_width - len(msg)) // 2), self.GREEN_TEXT | curses.A_REVERSE)
+        self.tasks_ui_window.refresh()
+        ch = self.tasks_ui_window.getch()
+        if ch == curses.KEY_RESIZE: 
+            self.terminal_height, self.terminal_width = self.stdscr.getmaxyx()
+            if not self.rework_windows: self.rework_windows = True
+    
+    def resize_updates(self, execution = None, int_human_index = None):
+        self.terminal_height, self.terminal_width = self.stdscr.getmaxyx()
+        self.render_frame(execution, int_human_index)
 
     def position_prompt(self):
+        if self.input_state != input_state.POSITION: self.input_state = input_state.POSITION
         position_prompt = "Which position would you like to modify: "
+        self.printstr(self.tasks_ui_window, position_prompt, self.INFO_PROMPTS_START_Y, self.INDEX_START_X); self.tasks_ui_window.clrtobot()
+        self.printstr(self.tasks_ui_window, f"Enter '{self.EXIT_STR}' or '0' to exit.", self.INFO_PROMPTS_START_Y + 1, self.INDEX_START_X)
+        self.printstr(self.tasks_ui_window, "Use '+' to append a new task.", self.INFO_PROMPTS_START_Y + 2, self.INDEX_START_X)
+        self.printstr(self.tasks_ui_window, "Grey tasks = Finished", self.INFO_PROMPTS_START_Y + 3, self.INDEX_START_X, curses.A_DIM)
+        
+        if self.manager.current_active > 0:    
+            rectangle(self.tasks_ui_window, self.INFO_PROMPTS_START_Y + 3, self.ACTIVE_MARK_X - 1, self.INFO_PROMPTS_START_Y + 5, self.ACTIVE_MARK_X + 1)
+            self.printstr(self.tasks_ui_window, "*", self.INFO_PROMPTS_START_Y + 4, self.ACTIVE_MARK_X)
+            self.printstr(self.tasks_ui_window, f"Active focus slots: {self.manager.current_active}/{self.manager.MAX_ACTIVE}",
+                          self.INFO_PROMPTS_START_Y + 4, self.INDEX_START_X)
 
-        self.input_window.addstr(0, self.LEFT_MARGIN, position_prompt); self.input_window.clrtobot()
-        self.input_window.addstr(1, self.LEFT_MARGIN, f"Enter '{self.EXIT_APP}' or '0' to exit.")
-        self.input_window.addstr(2, self.LEFT_MARGIN, "Enter position at the brim or '+' to add a new task at the end")
-        self.input_window.addstr(3, self.LEFT_MARGIN, "Grey tasks have been marked as finished", curses.A_DIM)
-        if self.current_active > 0:    
-            rectangle(self.input_window,
-                      3, self.ACTIVE_MARK_X - 1,
-                      5, self.ACTIVE_MARK_X + 1)
-            self.input_window.addstr(4, self.ACTIVE_MARK_X, "*")
-            self.input_window.addstr(4, self.LEFT_MARGIN, f"Active tasks are currently being accomplished. Maximum: {self.MAX_ACTIVE}")
-
-        self.input_window.move(0, self.LEFT_MARGIN + len(position_prompt))
-
-        self.input_window.refresh()
-
-        #let's user input get echoed on the screen whilst typing
-        curses.echo()
-        human_index = self.input_window.getstr().decode("utf-8").strip().lower()
-        curses.noecho()
-        return human_index
-
+        #moves the cursor
+        self.tasks_ui_window.move(self.INFO_PROMPTS_START_Y + 0, self.INDEX_START_X + len(position_prompt))
+        self.tasks_ui_window.refresh()
+        
     def execution_prompt(self, int_human_index):
-        self.input_window.addstr(0, self.LEFT_MARGIN, f"Position: {int_human_index}"); self.input_window.clrtobot()
-        self.input_window.addstr(1, self.LEFT_MARGIN, f"Press '{self.ADD_EXECUTE}' to add a task, '{self.EDIT_EXECUTE}' to edit tasks, '{self.DELETE_EXECUTE}' to delete tasks and '{self.QUIT_EXECUTE}' to unselect position.")
-        self.input_window.addstr(2, self.LEFT_MARGIN, f"Push '{self.ACTIVE_EXECUTE}' to toggle a task as active")
-        self.input_window.addstr(3, self.LEFT_MARGIN, f"Press '{self.PENDING_EXECUTE}' to toggle a task as finished")
-        self.input_window.addstr(5, self.LEFT_MARGIN, f"Active tasks: {self.current_active}/{self.MAX_ACTIVE}")
-
-        if not self.list_dicts[int_human_index - 1]["pending"]:
-            self.input_window.addstr(6, self.LEFT_MARGIN, f"Finished tasks cannot be set to active", curses.A_DIM)
-
-        self.input_window.refresh()
-
-        #Hides the cursor
-        curses.curs_set(0)
-        execution = self.input_window.getkey().lower()
-        curses.curs_set(1)
-        return execution
+        if self.input_state != input_state.EXECUTE: self.input_state = input_state.EXECUTE
+        Dict = self.manager.get_task_at(int_human_index - 1)
+        self.printstr(self.tasks_ui_window, f"Position: {int_human_index}", self.INFO_PROMPTS_START_Y, self.INDEX_START_X); self.tasks_ui_window.clrtobot()
+        self.printstr(self.tasks_ui_window, f"({self.ADD_CHAR})Add ({self.EDIT_CHAR})Edit ({self.DELETE_CHAR})Del ({self.QUIT_CHAR})Cancel",
+                      self.INFO_PROMPTS_START_Y + 1, self.INDEX_START_X)
+        self.printstr(self.tasks_ui_window, f"({self.ACTIVE_CHAR})Toggle Active ({self.PENDING_CHAR})Toggle Finish",
+                      self.INFO_PROMPTS_START_Y + 2, self.INDEX_START_X)
+        
+        if not Dict["pending"]:
+            self.printstr(self.tasks_ui_window, "Finished tasks cannot be active focus.", self.INFO_PROMPTS_START_Y + 4, self.ACTIVE_MARK_X, curses.A_DIM)
+        
+        self.tasks_ui_window.refresh()
 
     def task_string_prompt(self, execution, int_human_index):
-        #we don't need echo being triggered each loop cycle
-        curses.echo()
-        #looped to prevent annoying ux if empty string is provided
-        while True:
-            choosen_execution = "task" if execution == self.ADD_EXECUTE else "edit"
-            self.input_window.addstr(0, self.LEFT_MARGIN, f"Position: {int_human_index}"); self.input_window.clrtobot()
-            self.input_window.addstr(1, self.LEFT_MARGIN, f"new {choosen_execution}: ")
-            #conditional to catch empty string. 
-            # := lets you assign inside conditional expressions and returns false if assigned something empty
-            if not (mod_task := self.input_window.getstr().decode("utf-8").strip()):
-                continue    
-            curses.noecho()
-            return mod_task
-            
+        if self.input_state != input_state.STRING: self.input_state = input_state.STRING
+        choosen_execution = "task" if execution == Execution.ADD else "edit"
+        self.printstr(self.tasks_ui_window, f"Position: {int_human_index}", self.INFO_PROMPTS_START_Y, self.INDEX_START_X); self.tasks_ui_window.clrtobot()
+        self.printstr(self.tasks_ui_window, f"new {choosen_execution}: ", self.INFO_PROMPTS_START_Y + 1, self.INDEX_START_X)
+        self.tasks_ui_window.refresh()
 
-    def process_interaction(self):
-        #the functional code of this are small enough to warrant a single method
-        #most of the length is just boilerplate for error handling
-        human_index = self.position_prompt()
-        #triggers app closing
-        if human_index in (self.EXIT_APP, "0"):
-            return self.EXIT_APP, None, None
-        try:
-            #makes it so that inputing a '+' auto leads to adding a task at the brim
-            if human_index == "+":
-                int_human_index = len(self.list_dicts) + 1
-            else:
-                #throws ValueError often
-                int_human_index = int(human_index)
-            #plus one to account for when a use wants to add at the brim of the tasks
-            if not (0 < int_human_index <= len(self.list_dicts) + 1):
-                #throws invalid_index if position index inputs is out of logical scope of the tasks
-                raise invalid_index
-        #for UX reasons, I've decided these two exceptions should just trigger the a refresh of the frame
-        except (invalid_index, ValueError):
-            return None, None, None
-        #this loop exists to stop falling back to main menu when the user doesn't enter a valid option at getkey()
-        #that was bad for UX
+    def get_input(self, window, execution = None, int_human_index = None):
+        buffer = ""
         while True:
-            #makes it such that entering the positon at the brim auto leads to add execution
-            if int_human_index != len(self.list_dicts) + 1:
-                #should erase only what will be overwritten. solution => clrtobot: clears everything to the right and below the cursor
-                execution = self.execution_prompt(int_human_index)
-            else:
-                execution = self.ADD_EXECUTE
-            #I like this form of inputing processing for now because it is explicit
-            match execution:
-                case self.QUIT_EXECUTE:
-                    return None, None, None
-                case self.DELETE_EXECUTE | self.PENDING_EXECUTE:
-                    return execution, int_human_index - 1, None
-                case self.ACTIVE_EXECUTE:
-                    #prevents the creation of active task if at max or the task in marked as finished by holding the frame
-                    if (self.current_active == self.MAX_ACTIVE and not self.list_dicts[int_human_index - 1]["active"]) or not self.list_dicts[int_human_index - 1]["pending"]:
-                        continue
-                    #defensive programming in case of voodoo
-                    elif self.current_active > self.MAX_ACTIVE:
-                        self.enforce_max_active()
-                        return None, None, None
-                    else:
-                        return execution, int_human_index - 1, None
-                #cool implementation for taking a new string for new and edited tasks both using the singlular call
-                case self.ADD_EXECUTE | self.EDIT_EXECUTE:
-                    mod_task = self.task_string_prompt(execution, int_human_index)
-                    return execution, int_human_index - 1, mod_task
-                case _:
-                    #entering an invallid option at getkey holds the frame with this 'continue'
+            char_code = window.getch()
+
+            if char_code in (10, 13):
+                break
+            elif char_code == curses.KEY_RESIZE: self.rework_windows = True; self.resize_updates(execution, int_human_index); self.printstr(window, buffer)
+            elif char_code in (curses.KEY_BACKSPACE, 127, 8):
+                if not buffer:
                     continue
+                buffer = buffer[:-1]
+                y, x = window.getyx()
+                window.move(y, x - 1)
+                window.addch(" ")
+                window.move(y, x - 1)
+            elif 32 <= char_code <= 126:
+                char = chr(char_code)
+                buffer += char
+                self.printstr(window, char)
 
-    @sorts_saves_tasks
-    def process_execution(self, execution, int_index, mod_task):
+        return buffer
+    
+    def get_execution(self, window, int_human_index = None):
+        while True:
+            char_code = window.getch()
+            if char_code == curses.KEY_RESIZE: self.rework_windows = True; self.resize_updates(None, int_human_index)
+            else:
+                ch = chr(char_code).lower()
+                match ch:
+                    case self.ADD_CHAR: execution = Execution.ADD; break
+                    case self.EDIT_CHAR: execution = Execution.EDIT; break
+                    case self.DELETE_CHAR: execution = Execution.DELETE; break
+                    case self.PENDING_CHAR: execution = Execution.PENDING; break
+                    case self.ACTIVE_CHAR: execution = Execution.ACTIVE; break
+                    case self.QUIT_CHAR: execution = Execution.QUIT; break
+                    case _: continue
+        return execution
+    
+    def process_interaction(self):
+        if self.input_state != input_state.POSITION: self.position_prompt()
+        human_index = self.get_input(self.tasks_ui_window).strip()
+        if human_index.lower() in (self.EXIT_STR, "0"): return Execution.EXIT_APP, None, None
+        try:
+            # Route '+' or index to the appropriate logic position
+            int_human_index = self.manager.get_count() + 1 if human_index == "+" else int(human_index)
+            if not (0 < int_human_index <= self.manager.get_count() + 1): raise invalid_index
+        except (invalid_index, ValueError): return None, None, None
+        
+        while True:
+            # Auto-routing: Brim selection defaults to Add; existing index prompts for action
+            if int_human_index == self.manager.get_count() + 1: execution = Execution.ADD
+            else: 
+                self.execution_prompt(int_human_index)
+                curses.curs_set(0)
+                execution = self.get_execution(self.tasks_ui_window, int_human_index)
+                curses.curs_set(1)
+            
+            match execution:
+                case Execution.QUIT: return None, None, None
+                case Execution.DELETE | Execution.PENDING: return execution, int_human_index - 1, None
+                case Execution.ACTIVE:
+                    target_task = self.manager.get_task_at(int_human_index - 1)
+                    # Constraint: Prevent activation if finished or focus slots are full
+                    if (self.manager.current_active == self.manager.MAX_ACTIVE and not target_task["active"]) or not target_task["pending"]:
+                        continue
+                    return execution, int_human_index - 1, None
+                case Execution.ADD | Execution.EDIT:
+                    self.task_string_prompt(execution, int_human_index)
+                    while True:
+                        if (task_string := self.get_input(self.tasks_ui_window, execution, int_human_index).strip()): break
+                    return execution, int_human_index - 1, task_string
+                case _: continue
+
+    def process_execution(self, execution, int_index, mod_task = None):
+        # Bridges UI intent to Model logic and updates layout dimensions if needed
         match execution:
-            case self.ADD_EXECUTE:
-                Dict = {
-                    "task": mod_task,
-                    "active": False,
-                    "pending": True
-                }
-                self.list_dicts.insert(int_index, Dict)
-                self.number_of_tasks += 1
+            case Execution.ADD:
+                self.manager.add_task(int_index, mod_task)
                 self.rework_windows = True
-                new_task_display_length = len(mod_task) + len(str(int_index + 1)) + 2
-                if new_task_display_length > self.length_of_tasks:
-                    self.length_of_tasks = new_task_display_length
-            case self.EDIT_EXECUTE:
-                self.list_dicts[int_index]["task"] = mod_task
-                modded_task_display_length = len(mod_task) + len(str(int_index + 1)) + 2
-                if modded_task_display_length > self.length_of_tasks:
-                    self.length_of_tasks = modded_task_display_length
-                    self.rework_windows = True
-            case self.DELETE_EXECUTE:
-                deleted_task_display_length = len(self.list_dicts[int_index]["task"]) + len(str(int_index + 1)) + 2
-                self.list_dicts.pop(int_index)
-                self.number_of_tasks -= 1
+            case Execution.EDIT:
+                self.manager.edit_task(int_index, mod_task)
+            case Execution.DELETE:
+                self.manager.delete_task(int_index)
                 self.rework_windows = True
-                if deleted_task_display_length == self.length_of_tasks:
-                    self.length_of_tasks = max((len(Dict['task']) + len(str(index)) + 2 for index, Dict in enumerate(self.list_dicts, start = 1)),
-                                               default = 0)
-            case self.PENDING_EXECUTE:
-                if self.list_dicts[int_index]["active"]:
-                    self.list_dicts[int_index]["active"] = not self.list_dicts[int_index]["active"]
-                    self.current_active -= 1
-                self.list_dicts[int_index]["pending"] = not self.list_dicts[int_index]["pending"]
-            case self.ACTIVE_EXECUTE:
-                self.list_dicts[int_index]["active"] = not self.list_dicts[int_index]["active"]
-                if not self.list_dicts[int_index]["active"]:
-                    self.current_active -= 1
-                else:
-                    self.current_active += 1
+            case Execution.PENDING: self.manager.toggle_pending(int_index)
+            case Execution.ACTIVE: self.manager.toggle_active(int_index)
 
 if __name__ == "__main__":
-    #initialises curses and calls main
+    # Standard curses wrapper handles terminal initialisation and cleanup
     wrapper(main)
