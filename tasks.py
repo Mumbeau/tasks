@@ -127,7 +127,7 @@ class tasks_app:
         self.header_x = self.header_x = 6 + len(str(self.manager.get_count()))
         self.rework_windows = False
         self.highlighted_task_index = None
-        self.scroll_offset, self.situational_task = 0, 0
+        self.scroll_offset, self.situational_task, self.situational_shift = 0, 0, 0
         
 
         self.INFO_PROMPTS_START_Y = min(self.manager.get_count() + self.PAD_START_Y + 2, self.terminal_height - self.INFO_PROMPTS_HEIGHT)
@@ -145,6 +145,7 @@ class tasks_app:
         self.input_state = input_state_enum.POSITION
 
         self.tasks_ui_window.keypad(True)
+        curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
 
         curses.init_pair(1, curses.COLOR_GREEN, 234)
         curses.init_pair(2, curses.COLOR_GREEN, 235)
@@ -154,6 +155,9 @@ class tasks_app:
         self.GREEN_TEXT_ALT = curses.color_pair(2)
         self.FINISHED_TEXT = curses.color_pair(3) | curses.A_DIM
         self.FINISHED_TEXT_ALT = curses.color_pair(4) | curses.A_DIM
+
+        self.pad_end_Y = min(self.manager.get_count() + self.PAD_START_Y - 1 + self.situational_task,
+                            self.terminal_height - self.INFO_PROMPTS_HEIGHT - 3 + self.situational_task)
 
         self.tasks_ui_window.attron(self.GREEN_TEXT)
 
@@ -228,31 +232,30 @@ class tasks_app:
             list_dicts = self.manager.get_tasks()
             #a task that only appears when user to one place over the final task
             self.situational_task = 1 if self.highlighted_task_index == number_of_tasks else 0
-            pad_end_y = min(number_of_tasks + self.PAD_START_Y - 1 + self.situational_task,
+            self.pad_end_Y = min(number_of_tasks + self.PAD_START_Y - 1 + self.situational_task,
                             self.terminal_height - self.INFO_PROMPTS_HEIGHT - 3 + self.situational_task)
             
-            number_of_displayed_tasks = pad_end_y - self.PAD_START_Y
+            number_of_displayed_tasks = self.pad_end_Y - self.PAD_START_Y
             should_scroll_down = self.highlighted_task_index is not None and self.highlighted_task_index > self.scroll_offset + number_of_displayed_tasks
             should_scroll_up = self.highlighted_task_index is not None and self.highlighted_task_index < self.scroll_offset
             if should_scroll_down and self.highlighted_task_index is not None: self.scroll_offset = self.highlighted_task_index - number_of_displayed_tasks
             if should_scroll_up and self.highlighted_task_index is not None: self.scroll_offset = self.highlighted_task_index
             #sometimes, situational task has a displayed index that is one digit longer than the others
-            situational_shift = 1 if len(str(number_of_tasks + self.situational_task)) > len(str(number_of_tasks)) else 0
+            self.situational_shift = 1 if len(str(number_of_tasks + self.situational_task)) > len(str(number_of_tasks)) else 0
             
-            self.render_ui_elements(number_of_tasks, pad_end_y, situational_shift)
+            self.render_ui_elements(number_of_tasks)
             if number_of_tasks + self.situational_task > self.pad_height:
                 self.pad_height = number_of_tasks + self.situational_task
                 self.tasks_pad.resize(self.pad_height, self.pad_width)
-            self.printstr(self.tasks_ui_window, "tasks:", self.HEADER_Y, self.header_x + situational_shift, self.GREEN_TEXT | curses.A_BOLD)
+            self.printstr(self.tasks_ui_window, "tasks:", self.HEADER_Y, self.header_x + self.situational_shift, self.GREEN_TEXT | curses.A_BOLD)
             for index, Dict in enumerate(list_dicts):
                 if Dict["active"] and index >= self.scroll_offset:
                     self.printstr(self.tasks_ui_window, "*", index + self.PAD_START_Y - self.scroll_offset, self.ACTIVE_MARK_X)
                 style = ((self.GREEN_TEXT if index % 2 == 0 else self.GREEN_TEXT_ALT) if Dict["pending"] else 
                         (self.FINISHED_TEXT if index % 2 == 0 else self.FINISHED_TEXT_ALT))
                 if index == self.highlighted_task_index: style = style | curses.A_REVERSE
-                #aligns indices to the right edge of their rectangle
-                index_margin = (" " * ((len(str(number_of_tasks)) - len(str(index + 1))) + situational_shift) 
-                                if len(str(index + 1)) < len(str(number_of_tasks)) + situational_shift else "")
+                index_margin = (" " * ((len(str(number_of_tasks)) - len(str(index + 1))) + self.situational_shift) 
+                                if len(str(index + 1)) < len(str(number_of_tasks)) + self.situational_shift else "")
                 if len(f"{index_margin}{index + 1}{Dict['task']}") > self.pad_width:
                     self.pad_width = len(Dict["task"])
                     self.tasks_pad.resize(self.pad_height, self.pad_width)
@@ -261,15 +264,15 @@ class tasks_app:
             if self.highlighted_task_index == number_of_tasks:
                 style = self.GREEN_TEXT | curses.A_REVERSE if self.highlighted_task_index % 2 == 0 else self.GREEN_TEXT_ALT | curses.A_REVERSE
                 self.printstr(self.tasks_pad, f"{number_of_tasks + 1}", number_of_tasks , 0, style)
-                if number_of_tasks > number_of_displayed_tasks: self.printstr(self.tasks_ui_window, "█", pad_end_y, self.terminal_width - 2)
+                if number_of_tasks > number_of_displayed_tasks: self.printstr(self.tasks_ui_window, "█", self.pad_end_Y, self.terminal_width - 2)
 
             self.tasks_ui_window.noutrefresh()
             # pad rendering of indices
             self.tasks_pad.noutrefresh(self.scroll_offset, 0, self.PAD_START_Y, self.INDEX_START_X,
-                                       pad_end_y, self.INDEX_START_X + len(str(number_of_tasks)) - 1 + situational_shift)
+                                       self.pad_end_Y, self.INDEX_START_X + len(str(number_of_tasks)) - 1 + self.situational_shift)
             # pad rendering of task lines
-            self.tasks_pad.noutrefresh(self.scroll_offset, len(str(number_of_tasks)) + situational_shift, self.PAD_START_Y, self.header_x + situational_shift,
-                                       pad_end_y, self.terminal_width - 4)
+            self.tasks_pad.noutrefresh(self.scroll_offset, len(str(number_of_tasks)) + self.situational_shift, self.PAD_START_Y, self.header_x + self.situational_shift,
+                                       self.pad_end_Y, self.terminal_width - 4)
         else:
             self.INFO_PROMPTS_START_Y = self.PAD_START_Y + 2
             self.tasks_ui_window.resize(self.terminal_height, self.terminal_width)
@@ -285,7 +288,7 @@ class tasks_app:
 
         curses.doupdate()
 
-    def render_ui_elements(self, number_of_tasks, pad_end_y, situational_shift):
+    def render_ui_elements(self, number_of_tasks):
         # Handles Dynamic Window Scaling and UI container rectangles
         if self.rework_windows:
             self.INFO_PROMPTS_START_Y = min(number_of_tasks + self.PAD_START_Y + 2, self.terminal_height - self.INFO_PROMPTS_HEIGHT)
@@ -298,9 +301,9 @@ class tasks_app:
                 rectangle(self.tasks_ui_window, self.PAD_START_Y - 1, self.ACTIVE_MARK_X - 1,
                           max(self.manager.current_active + self.PAD_START_Y - self.scroll_offset, self.PAD_START_Y - 1), self.ACTIVE_MARK_X + 1)
         rectangle(self.tasks_ui_window, self.PAD_START_Y - 1, self.INDEX_START_X - 1,
-                pad_end_y + 1, self.INDEX_START_X + len(str(number_of_tasks)) + situational_shift)
-        rectangle(self.tasks_ui_window, self.PAD_START_Y - 1, self.header_x - 1 + situational_shift,
-                pad_end_y + 1, self.terminal_width - 3)
+                self.pad_end_Y + 1, self.INDEX_START_X + len(str(number_of_tasks)) + self.situational_shift)
+        rectangle(self.tasks_ui_window, self.PAD_START_Y - 1, self.header_x - 1 + self.situational_shift,
+                self.pad_end_Y + 1, self.terminal_width - 3)
         
         scrollbar_height = (min(number_of_tasks + self.PAD_START_Y - 1, self.terminal_height - self.INFO_PROMPTS_HEIGHT - 3) + 1) - self.PAD_START_Y 
         #the ultimate task that can be scrolled to based on how big the viewport is
@@ -401,6 +404,20 @@ class tasks_app:
                     self.rework_windows = True
                     self.resize_updates(execution)
                     curses.curs_set(0) #screen size warning frame can unhide the cursor
+                case curses.KEY_MOUSE:
+                    _, mouse_x, mouse_y, _, button_state = curses.getmouse()
+                    if button_state & curses.BUTTON1_CLICKED:
+                        within_pad_width = self.header_x + self.situational_shift <= mouse_x <= self.terminal_width - 4
+                        within_pad_height = self.PAD_START_Y <= mouse_y <= self.pad_end_Y + self.situational_task
+                        if within_pad_width and within_pad_height:
+                            self.highlighted_task_index = mouse_y - self.PAD_START_Y + self.scroll_offset
+                            self.render_frame(execution)
+                            break
+                    elif button_state & curses.BUTTON4_PRESSED:
+                        if self.highlighted_task_index is not None and self.highlighted_task_index > 0: self.highlighted_task_index -= 1
+                    elif button_state & getattr(curses, "BUTTON5_PRESSED", 0x200000):
+                        if self.highlighted_task_index is None: self.highlighted_task_index = 1
+                        elif self.highlighted_task_index < self.manager.get_count(): self.highlighted_task_index += 1
                 case curses.KEY_UP:
                     if self.highlighted_task_index is None or not self.highlighted_task_index > 0: self.highlighted_task_index = self.manager.get_count()
                     else: self.highlighted_task_index -= 1
