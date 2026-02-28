@@ -1,6 +1,6 @@
 import curses
 import json
-from curses import wrapper
+from curses import BUTTON1_DOUBLE_CLICKED, BUTTON1_TRIPLE_CLICKED, wrapper
 from curses.textpad import rectangle
 from enum import Enum, auto
 
@@ -146,7 +146,7 @@ class tasks_app:
 
         self.tasks_ui_window.keypad(True)
         curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
-
+        curses.halfdelay(1)
         curses.init_pair(1, curses.COLOR_GREEN, 234)
         curses.init_pair(2, curses.COLOR_GREEN, 235)
         curses.init_pair(3, curses.COLOR_WHITE, 234)
@@ -406,11 +406,11 @@ class tasks_app:
                     curses.curs_set(0) #screen size warning frame can unhide the cursor
                 case curses.KEY_MOUSE:
                     _, mouse_x, mouse_y, _, button_state = curses.getmouse()
-                    if button_state & curses.BUTTON1_CLICKED:
+                    if button_state & (curses.BUTTON1_CLICKED | curses.BUTTON1_DOUBLE_CLICKED | curses.BUTTON1_TRIPLE_CLICKED):
                         within_pad_width = self.header_x + self.situational_shift <= mouse_x <= self.terminal_width - 4
                         within_pad_height = self.PAD_START_Y <= mouse_y <= self.pad_end_Y + self.situational_task
                         if within_pad_width and within_pad_height:
-                            self.highlighted_task_index = mouse_y - self.PAD_START_Y + self.scroll_offset
+                            self.highlighted_task_index = (mouse_y - self.PAD_START_Y) + self.scroll_offset
                             self.render_frame(execution)
                             break
                     elif button_state & curses.BUTTON4_PRESSED:
