@@ -60,7 +60,6 @@ class TaskManager:
 
     @sorts_saves_tasks
     def delete_task(self, index):
-        # Decrement counter if we are removing a task currently in an active focus slot
         if self.list_dicts[index]["active"]: self.current_active -= 1
         if self.list_dicts[index]["pending"]: self.current_pending -= 1
         self.list_dicts.pop(index)
@@ -76,8 +75,9 @@ class TaskManager:
 
     @sorts_saves_tasks
     def toggle_active(self, index):
-        self.list_dicts[index]["active"] = not self.list_dicts[index]["active"]
-        self.current_active += 1 if self.list_dicts[index]["active"] else -1
+        if not (not self.list_dicts[index]["active"] and self.current_active >= self.MAX_ACTIVE): 
+            self.list_dicts[index]["active"] = not self.list_dicts[index]["active"]
+            self.current_active += 1 if self.list_dicts[index]["active"] else -1
 
     def get_tasks(self): return self.list_dicts
     def get_count(self): return len(self.list_dicts)
@@ -158,7 +158,8 @@ class tasks_app:
 
         self.pad_end_Y = min(self.manager.get_count() + self.PAD_START_Y - 1 + self.situational_task,
                             self.terminal_height - self.INFO_PROMPTS_HEIGHT - 3 + self.situational_task)
-
+        self.executions_text = ["ADD", "EDIT", "TOGGLE ACTIVE", "TOGGLE FINISHED", "DELETE", "CANCEL"]
+        
         self.tasks_ui_window.attron(self.GREEN_TEXT)
 
     def run(self):
@@ -369,10 +370,9 @@ class tasks_app:
         
     def execution_prompt(self, highlighted_execution = None):
         if self.input_state != input_state_enum.EXECUTE: self.input_state = input_state_enum.EXECUTE
-        executions_texts = ["ADD", "EDIT", "TOGGLE ACTIVE", "TOGGLE FINISHED", "DELETE", "CANCEL"]
         self.printstr(self.tasks_ui_window, f"Position: {self.highlighted_task_index + 1}", self.INFO_PROMPTS_START_Y, self.INDEX_START_X); self.tasks_ui_window.clrtobot()
 
-        for index, execution in enumerate(executions_texts, start = 1):
+        for index, execution in enumerate(self.executions_text, start = 1):
             style = self.GREEN_TEXT | curses.A_REVERSE if highlighted_execution == index else self.GREEN_TEXT
             if index == 3:
                 target_task = self.manager.get_task_at(self.highlighted_task_index)
@@ -428,6 +428,59 @@ class tasks_app:
             self.render_frame(execution)
         curses.curs_set(1)
     
+    def get_execution(self, window):
+        curses.curs_set(0)
+        highlighted_execution = None
+        number_of_executiions = 6
+        while True:
+            char_code = window.getch()
+            match char_code:
+                case code if code == ord("q") or code == ord("Q") or code == ord("0") or code == 27:
+                    curses.curs_set(1); return execution_enum.QUIT
+                case 10 | 13: #enter key
+                    if highlighted_execution is not None:
+                        if highlighted_execution == 3:
+                            target_task = self.manager.get_task_at(self.highlighted_task_index)
+                            # Constraint: Prevent activation if finished or focus slots are full
+                            if (self.manager.current_active == self.manager.MAX_ACTIVE and not target_task["active"]) or not target_task["pending"]:
+                                continue
+                        break
+                case curses.KEY_RESIZE: 
+                    self.rework_windows = True; self.resize_updates()
+                    curses.curs_set(0) #screen size warning frame can unhide the cursor
+                case curses.KEY_MOUSE:
+                    _, mouse_x, mouse_y, _, button_state = curses.getmouse()
+                    if button_state & (curses.BUTTON1_CLICKED | curses.BUTTON1_DOUBLE_CLICKED | curses.BUTTON1_TRIPLE_CLICKED):
+                        within_execution_height = self.INFO_PROMPTS_START_Y + 1 <= mouse_y <= (self.INFO_PROMPTS_START_Y + 1) + number_of_executiions
+                        if  within_execution_height:
+                            executions_text_index = mouse_y - (self.INFO_PROMPTS_START_Y + 1)
+                            within_execution_width = self.INDEX_START_X <= mouse_x <= self.INDEX_START_X + len(self.executions_text[executions_text_index])
+                            if within_execution_width:
+                                highlighted_execution = executions_text_index + 1
+                                self.execution_prompt(highlighted_execution)
+                                if highlighted_execution == 3:
+                                    target_task = self.manager.get_task_at(self.highlighted_task_index)
+                                    # Constraint: Prevent activation if finished or focus slots are full
+                                    if (self.manager.current_active == self.manager.MAX_ACTIVE and not target_task["active"]) or not target_task["pending"]:
+                                        continue
+                                break 
+                case curses.KEY_UP:
+                    if highlighted_execution is None or not highlighted_execution > 1: highlighted_execution = number_of_executiions
+                    else: highlighted_execution -= 1
+                case curses.KEY_DOWN:
+                    if highlighted_execution is None or not highlighted_execution < number_of_executiions: highlighted_execution = 1
+                    else: highlighted_execution += 1
+                case _: continue
+            self.execution_prompt(highlighted_execution)
+        curses.curs_set(1)
+        match highlighted_execution:
+            case 1: return execution_enum.ADD
+            case 2: return execution_enum.EDIT
+            case 3: return execution_enum.ACTIVE
+            case 4: return execution_enum.PENDING
+            case 5: return execution_enum.DELETE
+            case 6: return execution_enum.QUIT
+
     def get_string(self, window, execution = None, buffer = "", style = None):
         original_y, original_x = window.getyx()
         _, max_x = window.getmaxyx()
@@ -480,42 +533,6 @@ class tasks_app:
                     char = chr(char_code)
                     buffer = buffer[:buffer_cursor_pos] + char + buffer[buffer_cursor_pos:]
                     buffer_cursor_pos += 1
-    
-    def get_execution(self, window):
-        curses.curs_set(0)
-        highlighted_execution = None
-        while True:
-            char_code = window.getch()
-            match char_code:
-                case code if code == ord("q") or code == ord("Q") or code == ord("0") or code == 27:
-                    curses.curs_set(1); return execution_enum.QUIT
-                case 10 | 13: #enter key
-                    if highlighted_execution is not None:
-                        if highlighted_execution == 3:
-                            target_task = self.manager.get_task_at(self.highlighted_task_index)
-                            # Constraint: Prevent activation if finished or focus slots are full
-                            if (self.manager.current_active == self.manager.MAX_ACTIVE and not target_task["active"]) or not target_task["pending"]:
-                                continue
-                        break
-                case curses.KEY_RESIZE: 
-                    self.rework_windows = True; self.resize_updates()
-                    curses.curs_set(0) #screen size warning frame can unhide the cursor
-                case curses.KEY_UP:
-                    if highlighted_execution is None or not highlighted_execution > 1: highlighted_execution = 6
-                    else: highlighted_execution -= 1
-                case curses.KEY_DOWN:
-                    if highlighted_execution is None or not highlighted_execution < 6: highlighted_execution = 1
-                    else: highlighted_execution += 1
-                case _: continue
-            self.execution_prompt(highlighted_execution)
-        curses.curs_set(1)
-        match highlighted_execution:
-            case 1: return execution_enum.ADD
-            case 2: return execution_enum.EDIT
-            case 3: return execution_enum.ACTIVE
-            case 4: return execution_enum.PENDING
-            case 5: return execution_enum.DELETE
-            case 6: return execution_enum.QUIT
     
     def process_interaction(self):
         if self.input_state != input_state_enum.POSITION: self.position_prompt()
