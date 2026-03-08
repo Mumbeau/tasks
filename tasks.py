@@ -30,21 +30,20 @@ class TaskManager:
             return list_dicts
 
     def enforce_max_active(self):
-        # Hard-caps active tasks and resets invalid active states (e.g. active but finished)
+        #cleans up any external json file manipulation
         current_active, current_pending, changes = 0, 0, False
         for Dict in self.list_dicts:
             if Dict["pending"]: current_pending += 1
             if (Dict["active"] and not Dict["pending"]):
                 Dict["active"] = False
                 if not changes: changes = True
-            if Dict["active"] and Dict["pending"]: current_active += 1
             # Deactivate if over limit or if task was finished while active
-            if current_active > self.MAX_ACTIVE and Dict["active"]:
+            if current_active == self.MAX_ACTIVE and Dict["active"]:
                 Dict["active"] = False
-                current_active -= 1
                 if not changes: changes = True
+            if Dict["active"] and Dict["pending"]: current_active += 1
+        self.list_dicts.sort(key=lambda Dict: (not Dict["active"], not Dict["pending"]))
         if changes:
-            self.list_dicts.sort(key=lambda Dict: (not Dict["active"], not Dict["pending"]))
             with open("tasks.json", "w") as f:
                 json.dump(self.list_dicts, f)
         return current_active, current_pending
@@ -127,8 +126,9 @@ class tasks_app:
         self.header_x = self.header_x = 6 + len(str(self.manager.get_count()))
         self.rework_windows = False
         self.highlighted_task_index = None
-        self.scroll_offset, self.situational_task, self.situational_shift = 0, 0, 0
+        self.scroll_offset, self.situational_task, self.situational_shift, self.max_scroll_offset, self.number_of_displayed_tasks = 0, 0, 0, 0, 0
         
+
 
         self.INFO_PROMPTS_START_Y = min(self.manager.get_count() + self.PAD_START_Y + 2, self.terminal_height - self.INFO_PROMPTS_HEIGHT)
         
@@ -236,10 +236,10 @@ class tasks_app:
             self.pad_end_Y = min(number_of_tasks + self.PAD_START_Y - 1 + self.situational_task,
                             self.terminal_height - self.INFO_PROMPTS_HEIGHT - 3 + self.situational_task)
             
-            number_of_displayed_tasks = self.pad_end_Y - self.PAD_START_Y
-            should_scroll_down = self.highlighted_task_index is not None and self.highlighted_task_index > self.scroll_offset + number_of_displayed_tasks
+            self.number_of_displayed_tasks = self.pad_end_Y - self.PAD_START_Y
+            should_scroll_down = self.highlighted_task_index is not None and self.highlighted_task_index > self.scroll_offset + self.number_of_displayed_tasks
             should_scroll_up = self.highlighted_task_index is not None and self.highlighted_task_index < self.scroll_offset
-            if should_scroll_down and self.highlighted_task_index is not None: self.scroll_offset = self.highlighted_task_index - number_of_displayed_tasks
+            if should_scroll_down and self.highlighted_task_index is not None: self.scroll_offset = self.highlighted_task_index - self.number_of_displayed_tasks
             if should_scroll_up and self.highlighted_task_index is not None: self.scroll_offset = self.highlighted_task_index
             #sometimes, situational task has a displayed index that is one digit longer than the others
             self.situational_shift = 1 if len(str(number_of_tasks + self.situational_task)) > len(str(number_of_tasks)) else 0
@@ -265,7 +265,7 @@ class tasks_app:
             if self.highlighted_task_index == number_of_tasks:
                 style = self.GREEN_TEXT | curses.A_REVERSE if self.highlighted_task_index % 2 == 0 else self.GREEN_TEXT_ALT | curses.A_REVERSE
                 self.printstr(self.tasks_pad, f"{number_of_tasks + 1}", number_of_tasks , 0, style)
-                if number_of_tasks > number_of_displayed_tasks: self.printstr(self.tasks_ui_window, "█", self.pad_end_Y, self.terminal_width - 2)
+                if number_of_tasks > self.number_of_displayed_tasks: self.printstr(self.tasks_ui_window, "█", self.pad_end_Y, self.terminal_width - 2)
 
             self.tasks_ui_window.noutrefresh()
             # pad rendering of indices
@@ -309,11 +309,11 @@ class tasks_app:
         scrollbar_height = (min(number_of_tasks + self.PAD_START_Y - 1, self.terminal_height - self.INFO_PROMPTS_HEIGHT - 3) + 1) - self.PAD_START_Y 
         #the ultimate task that can be scrolled to based on how big the viewport is
         #the actual distance the list can travel before it hits the "floor"
-        final_scroll = number_of_tasks - scrollbar_height
-        if final_scroll > 0:
+        self.max_scroll_offset = number_of_tasks - scrollbar_height
+        if self.max_scroll_offset > 0:
             #between 0.0 (The Top) and 1.0 (The Bottom)
-            #divide final_scroll instead of number_of_tasks so ratio is 1.0 at end of scroll
-            scroll_ratio = self.scroll_offset / final_scroll   
+            #divide self.max_scroll_offset instead of number_of_tasks so ratio is 1.0 at end of scroll
+            scroll_ratio = self.scroll_offset / self.max_scroll_offset   
             scroll_thumb_size = max(int((scrollbar_height / number_of_tasks) * scrollbar_height), 1)
             #without substracting thumb size you'd have the bottom location of it rather than the top
             scroll_thumb_pos = int(scroll_ratio * (scrollbar_height - scroll_thumb_size))
@@ -347,9 +347,9 @@ class tasks_app:
     def resize_updates(self, execution = None):
         self.terminal_height, self.terminal_width = self.stdscr.getmaxyx()
         if self.highlighted_task_index is not None:
-            number_of_displayed_tasks = min(self.manager.get_count() + self.PAD_START_Y - 1 + self.situational_task,
+            self.number_of_displayed_tasks = min(self.manager.get_count() + self.PAD_START_Y - 1 + self.situational_task,
                                         self.terminal_height - self.INFO_PROMPTS_HEIGHT - 3 + self.situational_task) - self.PAD_START_Y
-            self.scroll_offset = max(self.highlighted_task_index - number_of_displayed_tasks, 0)
+            self.scroll_offset = max(self.highlighted_task_index - self.number_of_displayed_tasks, 0)
         self.render_frame(execution)
 
     def position_prompt(self):
@@ -414,15 +414,17 @@ class tasks_app:
                             self.render_frame(execution)
                             break
                     elif button_state & curses.BUTTON4_PRESSED:
-                        if self.highlighted_task_index is not None and self.highlighted_task_index > 0: self.highlighted_task_index -= 1
+                        if self.highlighted_task_index == self.scroll_offset + self.number_of_displayed_tasks and self.scroll_offset != 0:
+                            self.highlighted_task_index -= 1
+                        if self.scroll_offset != 0: self.scroll_offset -= 1
                     elif button_state & getattr(curses, "BUTTON5_PRESSED", 0x200000):
-                        if self.highlighted_task_index is None: self.highlighted_task_index = 1
-                        elif self.highlighted_task_index < self.manager.get_count(): self.highlighted_task_index += 1
+                        if self.highlighted_task_index == self.scroll_offset and self.scroll_offset != self.max_scroll_offset: self.highlighted_task_index += 1
+                        if self.scroll_offset != self.max_scroll_offset: self.scroll_offset += 1
                 case curses.KEY_UP:
-                    if self.highlighted_task_index is None or not self.highlighted_task_index > 0: self.highlighted_task_index = self.manager.get_count()
+                    if self.highlighted_task_index is None or self.highlighted_task_index == 0: self.highlighted_task_index = self.manager.get_count()
                     else: self.highlighted_task_index -= 1
                 case curses.KEY_DOWN:
-                    if self.highlighted_task_index is None or not self.highlighted_task_index < self.manager.get_count(): self.highlighted_task_index = 0
+                    if self.highlighted_task_index is None or self.highlighted_task_index == self.manager.get_count(): self.highlighted_task_index = 0
                     else: self.highlighted_task_index += 1
                 case _: continue
             self.render_frame(execution)
@@ -451,17 +453,17 @@ class tasks_app:
                 case curses.KEY_MOUSE:
                     _, mouse_x, mouse_y, _, button_state = curses.getmouse()
                     if button_state & (curses.BUTTON1_CLICKED | curses.BUTTON1_DOUBLE_CLICKED | curses.BUTTON1_TRIPLE_CLICKED):
-                        within_execution_height = self.INFO_PROMPTS_START_Y + 1 <= mouse_y <= (self.INFO_PROMPTS_START_Y + 1) + number_of_executiions
+                        within_execution_height = self.INFO_PROMPTS_START_Y + 1 <= mouse_y <= self.INFO_PROMPTS_START_Y + number_of_executiions
                         if  within_execution_height:
                             executions_text_index = mouse_y - (self.INFO_PROMPTS_START_Y + 1)
                             within_execution_width = self.INDEX_START_X <= mouse_x <= self.INDEX_START_X + len(self.executions_text[executions_text_index])
                             if within_execution_width:
                                 highlighted_execution = executions_text_index + 1
-                                self.execution_prompt(highlighted_execution)
                                 if highlighted_execution == 3:
                                     target_task = self.manager.get_task_at(self.highlighted_task_index)
                                     # Constraint: Prevent activation if finished or focus slots are full
                                     if (self.manager.current_active == self.manager.MAX_ACTIVE and not target_task["active"]) or not target_task["pending"]:
+                                        self.execution_prompt(highlighted_execution)
                                         continue
                                 break 
                 case curses.KEY_UP:
