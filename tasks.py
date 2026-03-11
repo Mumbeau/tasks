@@ -1,6 +1,7 @@
+import sys
 import curses
 import json
-from curses import BUTTON1_DOUBLE_CLICKED, BUTTON1_TRIPLE_CLICKED, wrapper
+from curses import BUTTON1_DOUBLE_CLICKED, BUTTON1_TRIPLE_CLICKED, REPORT_MOUSE_POSITION, wrapper
 from curses.textpad import rectangle
 from enum import Enum, auto
 
@@ -109,8 +110,12 @@ def main(stdscr):
                       f" Your current terminal ({curses.termname().decode()}) only supports {curses.COLORS} colors."]
         return error_msgs
 
-    app = tasks_app(stdscr, MAX_ACTIVE=3)
-    app.run()
+    try:
+        app = tasks_app(stdscr, MAX_ACTIVE=3)
+        app.run()
+    finally:
+        app._set_mouse_tracking(False)
+    
     return None
 
 class tasks_app:
@@ -145,8 +150,8 @@ class tasks_app:
         self.input_state = input_state_enum.POSITION
 
         self.tasks_ui_window.keypad(True)
-        curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
-        curses.halfdelay(1)
+        curses.mousemask(curses.ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION) 
+        curses.cbreak()
         curses.init_pair(1, curses.COLOR_GREEN, 234)
         curses.init_pair(2, curses.COLOR_GREEN, 235)
         curses.init_pair(3, curses.COLOR_WHITE, 234)
@@ -169,6 +174,18 @@ class tasks_app:
             execution, mod_task = self.process_interaction()
             if execution == execution_enum.EXIT_APP: break
             if execution: self.process_execution(execution, mod_task)
+
+    #uses escape sequences to enable or disable all mouse tracking modes
+    #tracking persisting after crashes lead to consistent crashing on that terminal intance from then on
+    def _set_mouse_tracking(self, should_enable):
+        esc_seq_end = "h" if should_enable else "l"
+        sys.stdout.write(
+                f"\033[?1000{esc_seq_end}"
+                f"\033[?1000{esc_seq_end}"
+                f"\033[?1000{esc_seq_end}"               
+                f"\033[?1000{esc_seq_end}"
+                )
+        sys.stdout.flush()
 
     def printstr(self, window, string, y = None, x = None, style = None):
         window_height, window_width = window.getmaxyx()
@@ -390,7 +407,7 @@ class tasks_app:
         self.printstr(self.tasks_ui_window, f"{choosen_execution}:", self.INFO_PROMPTS_START_Y + 1, self.INDEX_START_X)
         self.tasks_ui_window.refresh()
 
-    def tasks_navigation(self, window, execution = None):
+    def tasks_navigation(self, window):
         curses.curs_set(0)
         while True:
             char_code = window.getch()
@@ -402,7 +419,7 @@ class tasks_app:
                     self.highlighted_task_index = self.manager.get_count(); break
                 case curses.KEY_RESIZE:
                     self.rework_windows = True
-                    self.resize_updates(execution)
+                    self.resize_updates()
                     curses.curs_set(0) #screen size warning frame can unhide the cursor
                 case curses.KEY_MOUSE:
                     _, mouse_x, mouse_y, _, button_state = curses.getmouse()
@@ -411,7 +428,7 @@ class tasks_app:
                         within_pad_height = self.PAD_START_Y <= mouse_y <= self.pad_end_Y + self.situational_task
                         if within_pad_width and within_pad_height:
                             self.highlighted_task_index = (mouse_y - self.PAD_START_Y) + self.scroll_offset
-                            self.render_frame(execution)
+                            self.render_frame()
                             break
                     elif button_state & curses.BUTTON4_PRESSED:
                         if self.highlighted_task_index == self.scroll_offset + self.number_of_displayed_tasks and self.scroll_offset != 0:
@@ -427,7 +444,7 @@ class tasks_app:
                     if self.highlighted_task_index is None or self.highlighted_task_index == self.manager.get_count(): self.highlighted_task_index = 0
                     else: self.highlighted_task_index += 1
                 case _: continue
-            self.render_frame(execution)
+            self.render_frame()
         curses.curs_set(1)
     
     def get_execution(self, window):

@@ -7,8 +7,8 @@ A lightweight Python application for managing tasks running on the curses librar
 - Resize handling
 - Scrolling with proportional scrollbar
 - Arrow key navigation
-- Mouse input (in progress)
-- Project grouping (planned)
+- Mouse input
+- Project grouping (in progress)
 
 ## Usage
 Run the script using:
